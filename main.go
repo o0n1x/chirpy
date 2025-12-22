@@ -1,27 +1,40 @@
 package main
 
 import (
-	"fmt"
+	"database/sql"
 	"log"
 	"net/http"
+	"os"
 	"sync/atomic"
+
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+	"github.com/o0n1x/chirpy/internal/api"
+	"github.com/o0n1x/chirpy/internal/database"
 )
 
-type apiConfig struct {
-	fileserverHits atomic.Int32
-}
-
 func main() {
-
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
 	filepathRoot := "/app/"
 	port := "8080"
-	cfg := apiConfig{fileserverHits: atomic.Int32{}}
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Error connecting to DB: %v", err)
+	}
+	cfg := api.ApiConfig{FileserverHits: atomic.Int32{}}
+	cfg.DB = database.New(db)
+	cfg.Platform = os.Getenv("PLATFORM")
 
 	mux := http.NewServeMux()
-	mux.Handle(filepathRoot, http.StripPrefix("/app/", cfg.middlewareMetricsInc(http.FileServer(http.Dir(".")))))
-	mux.HandleFunc("GET /api/healthz", healthz)
-	mux.HandleFunc("GET /admin/metrics", cfg.gethits)
-	mux.HandleFunc("POST /admin/reset", cfg.resethits)
+	mux.Handle(filepathRoot, http.StripPrefix("/app/", cfg.MiddlewareMetricsInc(http.FileServer(http.Dir(".")))))
+	mux.HandleFunc("GET /api/healthz", api.Healthz)
+	mux.HandleFunc("GET /admin/metrics", cfg.Gethits)
+	mux.HandleFunc("POST /admin/reset", cfg.Resethits)
+	//mux.HandleFunc("POST /api/validate_chirp", validateChirp)
+	mux.HandleFunc("POST /api/chirps", cfg.CreateChirp)
+	mux.HandleFunc("GET /api/chirps/{id}", cfg.GetChirps)
+	mux.HandleFunc("POST /api/users", cfg.CreateUser)
 
 	s := &http.Server{
 		Handler: mux,
@@ -30,35 +43,4 @@ func main() {
 
 	log.Printf("Serving files from %s on port: %s\n", filepathRoot, port)
 	log.Fatal(s.ListenAndServe())
-}
-
-func healthz(w http.ResponseWriter, req *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(200)
-	w.Write([]byte("OK"))
-}
-
-func (cfg *apiConfig) gethits(w http.ResponseWriter, req *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(200)
-	w.Write([]byte(fmt.Sprintf(`
-<html>
-  <body>
-    <h1>Welcome, Chirpy Admin</h1>
-    <p>Chirpy has been visited %d times!</p>
-  </body>
-</html>`, cfg.fileserverHits.Load())))
-}
-
-func (cfg *apiConfig) resethits(w http.ResponseWriter, req *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(200)
-	cfg.fileserverHits.Store(0)
-}
-
-func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg.fileserverHits.Add(1)
-		next.ServeHTTP(w, r)
-	})
 }
