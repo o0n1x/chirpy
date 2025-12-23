@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/o0n1x/chirpy/internal/auth"
 	"github.com/o0n1x/chirpy/internal/database"
 )
 
@@ -17,6 +20,7 @@ type ApiConfig struct {
 	FileserverHits atomic.Int32
 	DB             *database.Queries
 	Platform       string
+	SECRET_JWT     string
 }
 
 type User struct {
@@ -114,53 +118,27 @@ func (cfg *ApiConfig) Resethits(w http.ResponseWriter, r *http.Request) {
 
 }
 
-// func validateChirp(w http.ResponseWriter, r *http.Request) {
-// 	type parameters struct {
-// 		Body string `json:"body"`
-// 	}
-
-// 	type returnVals struct {
-// 		CleanedBody string `json:"cleaned_body"`
-// 	}
-
-// 	decoder := json.NewDecoder(r.Body)
-// 	params := parameters{}
-// 	err := decoder.Decode(&params)
-// 	if err != nil {
-// 		log.Printf("Error decoding parameters: %s", err)
-// 		respondWithError(w, 400, "Invalid JSON in the request body")
-// 		return
-// 	}
-
-// 	if len(params.Body) == 0 {
-// 		respondWithError(w, 400, "Body is required")
-// 		return
-// 	}
-
-// 	isvalid := len(params.Body) <= 140
-// 	if !isvalid {
-// 		respondWithError(w, 400, "Chirp is too long")
-// 		return
-// 	} else {
-
-// 		cleanedbody := returnVals{
-// 			CleanedBody: cleanifyString(params.Body),
-// 		}
-
-// 		respondWithJSON(w, 200, cleanedbody)
-// 		return
-// 	}
-
-// }
-
 func (cfg *ApiConfig) CreateChirp(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error parsing header: %v", err)
+		respondWithError(w, 401, "Token missing or invalid")
+		return
+	}
+	userid, err := auth.ValidateJWT(token, cfg.SECRET_JWT)
+	if err != nil {
+		log.Printf("Error validating token: %v", err)
+		respondWithError(w, 401, "Token missing or invalid")
+		return
+	}
+
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		log.Printf("Error decoding parameters: %s", err)
 		respondWithError(w, 400, "Invalid JSON in the request body")
@@ -180,7 +158,7 @@ func (cfg *ApiConfig) CreateChirp(w http.ResponseWriter, r *http.Request) {
 	params.Body = cleanifyString(params.Body)
 	chirp, err := cfg.DB.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body:   params.Body,
-		UserID: uuid.NullUUID{UUID: params.UserID, Valid: true},
+		UserID: uuid.NullUUID{UUID: userid, Valid: true},
 	})
 	if err != nil {
 		log.Printf("Error creating chirp: %v", err)
@@ -199,7 +177,8 @@ func (cfg *ApiConfig) CreateChirp(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *ApiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email string `json:"email"`
+		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -210,7 +189,16 @@ func (cfg *ApiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 400, "Invalid JSON in the request body")
 		return
 	}
-	user, err := cfg.DB.CreateUser(r.Context(), params.Email)
+	hashedpass, err := auth.HashPassword(params.Password)
+	if err != nil {
+		log.Printf("Error creating user: %v", err)
+		respondWithError(w, 500, "Failed to hash password")
+		return
+	}
+	user, err := cfg.DB.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: sql.NullString{String: hashedpass, Valid: true},
+	})
 	if err != nil {
 		log.Printf("Error creating user: %v", err)
 		respondWithError(w, 500, "Failed to create user")
@@ -224,6 +212,137 @@ func (cfg *ApiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 		Email:     user.Email,
 	})
 
+}
+
+func (cfg *ApiConfig) UpdateUser(w http.ResponseWriter, r *http.Request) {
+
+}
+
+func (cfg *ApiConfig) Login(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		log.Printf("Error decoding parameters: %s", err)
+		respondWithError(w, 400, "Invalid JSON in the request body")
+		return
+	}
+
+	user, err := cfg.DB.GetUser(r.Context(), params.Email)
+	if err != nil {
+		log.Printf("user not found: %v", err)
+		respondWithError(w, 400, "Incorrect email or password")
+		return
+	}
+	ok, err := auth.CheckPasswordHash(params.Password, user.HashedPassword.String)
+	if !ok {
+		log.Printf("password does not match: %v", err)
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+
+	jwt_token, err := auth.MakeJWT(user.ID, cfg.SECRET_JWT, time.Hour)
+	if err != nil {
+		log.Printf("Error creating token: %v", err)
+		respondWithError(w, 500, "Failed to create token")
+		return
+	}
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		log.Printf("Error creating refresh token: %v", err)
+		respondWithError(w, 500, "Failed to create refresh token")
+		return
+	}
+
+	_, err = cfg.DB.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:     refreshToken,
+		UserID:    uuid.NullUUID{UUID: user.ID, Valid: true},
+		ExpiresAt: time.Now().Add(time.Hour * 1440), // 60 days
+	})
+	if err != nil {
+		log.Printf("refresh token creation failed: %v", err)
+		respondWithError(w, 500, "refresh token creation failed")
+		return
+	}
+
+	respondWithJSON(w, 200, struct {
+		ID           uuid.UUID `json:"id"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Email        string    `json:"email"`
+		Token        string    `json:"token"`
+		RefreshToken string    `json:"refresh_token"`
+	}{
+		ID:           user.ID,
+		CreatedAt:    user.CreatedAt,
+		UpdatedAt:    user.UpdatedAt,
+		Email:        user.Email,
+		Token:        jwt_token,
+		RefreshToken: refreshToken,
+	})
+
+}
+
+func (cfg *ApiConfig) Refresh(w http.ResponseWriter, r *http.Request) {
+	tkn, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error parsing header: %v", err)
+		respondWithError(w, 401, "Token missing or invalid")
+		return
+	}
+
+	token, err := cfg.DB.GetRefreshToken(context.Background(), tkn)
+	if err != nil {
+		log.Printf("refresh token retreival failed: %v", err)
+		respondWithError(w, 401, "refresh token invalid")
+		return
+	}
+	if token.ExpiresAt.Before(time.Now()) {
+		respondWithError(w, 401, "refresh token expired")
+		return
+	}
+	if token.RevokedAt.Valid {
+		respondWithError(w, 401, "refresh token revoked")
+		return
+	}
+	if !token.UserID.Valid {
+		log.Print("refresh token retreival failed: user id is null")
+		respondWithError(w, 500, "token generation failed")
+		return
+	}
+	jwt_token, err := auth.MakeJWT(token.UserID.UUID, cfg.SECRET_JWT, time.Hour)
+	if err != nil {
+		log.Printf("Error creating token: %v", err)
+		respondWithError(w, 500, "Failed to create token")
+		return
+	}
+
+	respondWithJSON(w, 200, struct {
+		Token string `json:"token"`
+	}{
+		Token: jwt_token,
+	})
+
+}
+
+func (cfg *ApiConfig) Revoke(w http.ResponseWriter, r *http.Request) {
+	tkn, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error parsing header: %v", err)
+		respondWithError(w, 401, "Token missing or invalid")
+		return
+	}
+	err = cfg.DB.RevokeRefreshToken(context.Background(), tkn)
+	if err != nil {
+		log.Printf("revoking token failed: %v", err)
+		respondWithError(w, 401, "refresh token invalid")
+		return
+	}
+	respondWithJSON(w, 204, nil)
 }
 
 //
