@@ -21,13 +21,15 @@ type ApiConfig struct {
 	DB             *database.Queries
 	Platform       string
 	SECRET_JWT     string
+	PolkaKey       string
 }
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 type Chirp struct {
@@ -91,6 +93,53 @@ func (cfg *ApiConfig) GetChirps(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	respondWithJSON(w, 200, returningChirps)
+}
+
+func (cfg *ApiConfig) DeleteChirp(w http.ResponseWriter, r *http.Request) {
+	chirpID := r.PathValue("id")
+	if chirpID == "" {
+		respondWithError(w, 400, "no ChirpID provided")
+		return
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error parsing header: %v", err)
+		respondWithError(w, 401, "Token missing or invalid")
+		return
+	}
+	userid, err := auth.ValidateJWT(token, cfg.SECRET_JWT)
+	if err != nil {
+		log.Printf("Error validating token: %v", err)
+		respondWithError(w, 401, "Token missing or invalid")
+		return
+	}
+
+	chirpUUID, err := uuid.Parse(chirpID)
+	if err != nil {
+		log.Printf("Error invalid chirp ID: %v", err)
+		respondWithError(w, 400, "invalid ID")
+		return
+	}
+	chirp, err := cfg.DB.GetChirp(r.Context(), chirpUUID)
+	if err != nil {
+		log.Printf("Error retrieving chirp: %v", err)
+		respondWithError(w, 404, "chirp not found")
+		return
+	}
+	if chirp.UserID.UUID != userid {
+		respondWithError(w, 403, "this user is not the author of the chirp")
+		return
+	}
+	err = cfg.DB.DeleteChirp(context.Background(), chirp.ID)
+	if err != nil {
+		log.Printf("Error deleting chirp: %v", err)
+		respondWithError(w, 404, "chirp not found")
+		return
+	}
+
+	respondWithJSON(w, 204, nil)
+
 }
 
 func (cfg *ApiConfig) Gethits(w http.ResponseWriter, r *http.Request) {
@@ -206,15 +255,65 @@ func (cfg *ApiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, 201, User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+		ID:          user.ID,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	})
 
 }
 
 func (cfg *ApiConfig) UpdateUser(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("Error parsing header: %v", err)
+		respondWithError(w, 401, "Token missing or invalid")
+		return
+	}
+	userid, err := auth.ValidateJWT(token, cfg.SECRET_JWT)
+	if err != nil {
+		log.Printf("Error validating token: %v", err)
+		respondWithError(w, 401, "Token missing or invalid")
+		return
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		log.Printf("Error decoding parameters: %s", err)
+		respondWithError(w, 400, "Invalid JSON in the request body")
+		return
+	}
+	hashedpass, err := auth.HashPassword(params.Password)
+	if err != nil {
+		log.Printf("Error creating user: %v", err)
+		respondWithError(w, 500, "Failed to hash password")
+		return
+	}
+	user, err := cfg.DB.UpdateUser(context.Background(), database.UpdateUserParams{
+		ID:             userid,
+		Email:          params.Email,
+		HashedPassword: sql.NullString{String: hashedpass, Valid: true},
+	})
+	if err != nil {
+		log.Printf("Error updating user: %v", err)
+		respondWithError(w, 500, "Failed to update user")
+		return
+	}
+
+	respondWithJSON(w, 200, User{
+		ID:          user.ID,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
+	})
 
 }
 
@@ -274,6 +373,7 @@ func (cfg *ApiConfig) Login(w http.ResponseWriter, r *http.Request) {
 		CreatedAt    time.Time `json:"created_at"`
 		UpdatedAt    time.Time `json:"updated_at"`
 		Email        string    `json:"email"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 		Token        string    `json:"token"`
 		RefreshToken string    `json:"refresh_token"`
 	}{
@@ -281,6 +381,7 @@ func (cfg *ApiConfig) Login(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:    user.CreatedAt,
 		UpdatedAt:    user.UpdatedAt,
 		Email:        user.Email,
+		IsChirpyRed:  user.IsChirpyRed,
 		Token:        jwt_token,
 		RefreshToken: refreshToken,
 	})
@@ -343,6 +444,48 @@ func (cfg *ApiConfig) Revoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondWithJSON(w, 204, nil)
+}
+
+func (cfg *ApiConfig) PolkaWebhook(w http.ResponseWriter, r *http.Request) {
+	apikey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		log.Printf("Error parsing header: %v", err)
+		respondWithError(w, 401, "API key invalid")
+		return
+	}
+	if apikey != cfg.PolkaKey {
+		respondWithError(w, 401, "API key invalid")
+		return
+	}
+
+	type parameters struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		log.Printf("Error decoding parameters: %s", err)
+		respondWithError(w, 400, "Invalid JSON in the request body")
+		return
+	}
+	if params.Event != "user.upgraded" {
+		log.Print("Error: invalid webhood event")
+		respondWithJSON(w, 204, nil)
+		return
+	} else {
+		err = cfg.DB.UpgradeUser(context.Background(), params.Data.UserID)
+		if err != nil {
+			log.Printf("upgrading user failed: %v", err)
+			respondWithError(w, 404, "upgrading user failed")
+			return
+		}
+		respondWithJSON(w, 204, nil)
+	}
+
 }
 
 //

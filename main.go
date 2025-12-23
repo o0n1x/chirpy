@@ -17,6 +17,7 @@ func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
 	secret := os.Getenv("SECRET_JWT")
+	polkakey := os.Getenv("POLKA_KEY")
 	filepathRoot := "/app/"
 	port := "8080"
 	db, err := sql.Open("postgres", dbURL)
@@ -27,6 +28,7 @@ func main() {
 	cfg.DB = database.New(db)
 	cfg.Platform = os.Getenv("PLATFORM")
 	cfg.SECRET_JWT = secret
+	cfg.PolkaKey = polkakey
 
 	mux := http.NewServeMux()
 	mux.Handle(filepathRoot, http.StripPrefix("/app/", cfg.MiddlewareMetricsInc(http.FileServer(http.Dir(".")))))
@@ -35,11 +37,13 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", cfg.Resethits)
 	mux.HandleFunc("POST /api/chirps", cfg.CreateChirp)
 	mux.HandleFunc("GET /api/chirps/{id}", cfg.GetChirps)
+	mux.HandleFunc("DELETE /api/chirps/{id}", cfg.DeleteChirp)
 	mux.HandleFunc("POST /api/users", cfg.CreateUser)
 	mux.HandleFunc("PUT /api/users", cfg.UpdateUser)
 	mux.HandleFunc("POST /api/login", cfg.Login)
 	mux.HandleFunc("POST /api/refresh", cfg.Refresh)
 	mux.HandleFunc("POST /api/revoke", cfg.Revoke)
+	mux.HandleFunc("POST /api/polka/webhooks", cfg.PolkaWebhook)
 
 	s := &http.Server{
 		Handler: mux,
