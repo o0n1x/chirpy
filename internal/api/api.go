@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -76,12 +77,35 @@ func (cfg *ApiConfig) GetChirps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chirps, err := cfg.DB.GetChirps(r.Context())
-	if err != nil {
-		log.Printf("Error retrieving chirps: %v", err)
-		respondWithError(w, 500, "Failed to retrieve chirps")
-		return
+	var chirps []database.Chirp
+
+	author_id := r.URL.Query().Get("author_id")
+	if author_id != "" {
+		userUUID, err := uuid.Parse(author_id)
+		if err != nil {
+			log.Printf("Error invalid author ID: %v", err)
+			respondWithError(w, 400, "invalid author ID")
+			return
+		}
+		chirps, err = cfg.DB.GetChirpsByAuthor(r.Context(), uuid.NullUUID{UUID: userUUID, Valid: true})
+		if err != nil {
+			log.Printf("Error retrieving chirp: %v", err)
+			respondWithError(w, 404, "chirp not found")
+			return
+		}
+
+	} else {
+		var err error
+		chirps, err = cfg.DB.GetChirps(r.Context())
+		if err != nil {
+			log.Printf("Error retrieving chirps: %v", err)
+			respondWithError(w, 500, "Failed to retrieve chirps")
+			return
+		}
 	}
+
+	sortby := r.URL.Query().Get("sort")
+
 	var returningChirps []Chirp
 	for _, chirp := range chirps {
 		returningChirps = append(returningChirps, Chirp{
@@ -90,6 +114,11 @@ func (cfg *ApiConfig) GetChirps(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt: chirp.UpdatedAt,
 			Body:      chirp.Body,
 			UserID:    chirp.UserID.UUID,
+		})
+	}
+	if sortby == "desc" {
+		sort.Slice(returningChirps, func(i, j int) bool {
+			return returningChirps[i].CreatedAt.After(returningChirps[j].CreatedAt)
 		})
 	}
 	respondWithJSON(w, 200, returningChirps)

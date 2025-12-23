@@ -36,6 +36,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", cfg.Gethits)
 	mux.HandleFunc("POST /admin/reset", cfg.Resethits)
 	mux.HandleFunc("POST /api/chirps", cfg.CreateChirp)
+	mux.HandleFunc("GET /api/chirps", cfg.GetChirps)
 	mux.HandleFunc("GET /api/chirps/{id}", cfg.GetChirps)
 	mux.HandleFunc("DELETE /api/chirps/{id}", cfg.DeleteChirp)
 	mux.HandleFunc("POST /api/users", cfg.CreateUser)
