@@ -7,6 +7,7 @@ A Twitter-like REST API built with Go as part of the [Boot.dev](https://boot.dev
 ## Features
 
 - User registration and authentication with JWT tokens
+- Secure password hashing with Argon2id
 - Refresh token support for extended sessions
 - Create, read, and delete chirps (140 character limit)
 - Profanity filter for chirp content
